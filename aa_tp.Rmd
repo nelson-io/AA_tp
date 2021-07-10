@@ -1,0 +1,168 @@
+---
+title: "tp Aprendizaje automático"
+author: "Tom Serra, Franco Gómez, Nelson Shilman"
+date: "7/9/2021"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Librerías
+
+```{r}
+library(tidyverse)
+library(naniar)
+library(kableExtra)
+library(ClustImpute)
+library(janitor)
+library(mice)
+
+
+
+```
+
+
+## importamos datos
+
+```{r}
+load("input/colisiones.RData")
+colisiones <- colisiones %>% clean_names()
+```
+
+# EDA
+Mostramos una muestra aleatoria de los datos del DF de colisiones
+
+```{r}
+colisiones %>% sample_n(5) %>% kable()
+```
+
+vemos tipos de datos
+```{r}
+glimpse(colisiones) 
+```
+
+
+## missing data
+
+```{r}
+miss_var_summary(colisiones)
+```
+
+```{r}
+gg_miss_upset(colisiones,nsets = 3)
+```
+## vemos correlaciones (tomamos observaciones completas)
+```{r}
+cor_df <- cor(colisiones %>% select_if(is.numeric) %>% filter(complete.cases(.)))
+most_corr_vars <- map_lgl(abs(cor_df) %>% data.frame(), ~ifelse(sum(., na.rm = T) >= 4.7 , T , F)) 
+corrplot::corrplot(cor(colisiones %>% select_if(is.numeric) %>% filter(complete.cases(.)) %>% select(names(.)[most_corr_vars])), type = 'lower')
+```
+
+## Outliers
+detectar outliers de manera univariada, visual y analíticamente
+
+#identificamos outliers
+```{r}
+get_outliers <- function(x){
+  quantiles <- quantile(x,c(.25,.75),na.rm = T)
+  IQR <- quantiles[2] - quantiles[1]
+  boundaries <- c(quantiles[1] - 1.5* IQR, quantiles[2] + 1.5 * IQR)
+  # print(boundaries)
+  
+  return(x[x<boundaries[1] | x > boundaries[2]])
+}
+```
+
+```{r}
+outliers <- map(colisiones %>% select_if(is.numeric), ~ get_outliers(.)) %>% set_names(colisiones %>% select_if(is.numeric) %>% names())
+
+#omitimos vectores nulos 
+outliers <- outliers[map_lgl(outliers, ~ if_else(length(.) > 0 , T, F))]
+
+#ploteamos resolver plots
+
+for(i in 1:length(outliers)){
+  
+  ggplot(outliers[[i]] %>% data.frame(var = .))+
+    geom_histogram(aes(x = var))
+  
+  
+  
+}
+
+
+
+```
+
+## Outliers multivariados
+
+armamos modelo lineal para emplear cook distance y determinar outliers
+
+```{r}
+mod <- lm(var_objetivo ~ ., data=colisiones %>% select_if(is.numeric))
+cooksd <- cooks.distance(mod)
+```
+
+```{r}
+plot(cooksd, pch="*", cex=2, main="Influential Obs by Cooks distance")  # plot cook's distance
+abline(h = 4*mean(cooksd, na.rm=T), col="red")  # add cutoff line
+text(x=1:length(cooksd)+1, y=cooksd, labels=ifelse(cooksd>4*mean(cooksd, na.rm=T),names(cooksd),""), col="red")  # add labels
+```
+```{r}
+influential <- as.numeric(names(cooksd)[(cooksd > 4*mean(cooksd, na.rm=T))])
+```
+
+vemos algunos de los valores extremos detectados de manera multivariada
+
+```{r}
+head(colisiones[influential, ])
+```
+removemos outliers multiariados
+```{r}
+colisiones <- colisiones[-influential,]
+```
+
+## dividimos train test 80 -20%
+
+```{r}
+set.seed(0)
+train_obs <- sample(1:nrow(colisiones),floor(.8 * nrow(colisiones)))
+train <- colisiones[train_obs,]
+test <- colisiones[-train_obs,]
+
+```
+
+## imputamos NAs con mice imputation
+
+```{r}
+imputed_train <- mice(train, m=1)
+```
+
+
+
+
+Balanceo de clases
+
+```{r}
+
+props <- colisiones$var_objetivo %>% table() %>% prop.table() %>% as.numeric() 
+
+ggplot(colisiones, aes(x = as.factor(var_objetivo)))+
+  geom_bar()+
+  annotate("text", x = as.factor(0), y = 150000, label = paste0(round(props[1],2) * 100,'%'), col = 'white')+
+  annotate("text", x = as.factor(1), y = 30000, label = paste0(round(props[2],2) * 100,'%'), col = 'white')+
+  xlab('Variable Objetivo')
+```
+
+
+# imputación de missing data con ClustImpute
+
+
+#armamos clusters con kmeans para luego imputar NAs 
+```{r}
+
+```
+
+
