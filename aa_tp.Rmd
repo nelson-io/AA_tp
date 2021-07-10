@@ -139,6 +139,9 @@ test <- colisiones[-train_obs,]
 ```{r}
 imputed_train <- mice(train, m=1)
 ```
+```{r}
+imp_train <- complete(imputed_train,1)
+```
 
 
 
@@ -147,7 +150,7 @@ Balanceo de clases
 
 ```{r}
 
-props <- colisiones$var_objetivo %>% table() %>% prop.table() %>% as.numeric() 
+props <- imp_train$var_objetivo %>% table() %>% prop.table() %>% as.numeric() 
 
 ggplot(colisiones, aes(x = as.factor(var_objetivo)))+
   geom_bar()+
@@ -155,14 +158,26 @@ ggplot(colisiones, aes(x = as.factor(var_objetivo)))+
   annotate("text", x = as.factor(1), y = 30000, label = paste0(round(props[2],2) * 100,'%'), col = 'white')+
   xlab('Variable Objetivo')
 ```
+Balanceamos train set con upsampoling
 
 
-# imputación de missing data con ClustImpute
-
-
-#armamos clusters con kmeans para luego imputar NAs 
 ```{r}
+train_balanced <- imp_train %>% 
+  filter(var_objetivo ==1) %>% 
+  sample_n(size = (imp_train$var_objetivo %>% table() %>% as.vector())[1],
+           replace = T) %>% 
+  rbind(imp_train %>% 
+  filter(var_objetivo ==0))
+
+
 
 ```
 
+
+write data
+
+```{r}
+write_csv(train_balanced, 'out/train_balanced.csv')
+write_csv(test, 'out/test.csv')
+```
 
