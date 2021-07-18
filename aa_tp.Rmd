@@ -18,18 +18,50 @@ library(kableExtra)
 library(ClustImpute)
 library(janitor)
 library(mice)
-
-
-
+library(caret)
+library(doParallel)
+library(Metrics)
+library(randomForest)
+library(gtools)
+library(tree)
+library(xgboost)
 ```
+
+
+
 
 
 ## importamos datos
 
 ```{r}
 load("input/colisiones.RData")
-colisiones <- colisiones %>% clean_names()
+colisiones <- colisiones %>% clean_names() %>% 
+  mutate_if(is.factor, as.character) %>% 
+  mutate(var_objetivo = as.factor(var_objetivo)) %>% 
+  mutate(potpeso = potencia/peso,
+         sportslx = ifelse(puertas<=3 & valor_vehiculo >= median(valor_vehiculo) & potencia >= median(potencia), 1, 0),
+         youngman = ifelse(sexo_tr == 'H' & edad_conductor <= 25,1,0),
+         oldwmn = ifelse(sexo_tr == 'M' & edad_conductor >= 60,1,0))
 ```
+
+removemos variable frec_colision_anyo_0 para evitar data leakage
+
+```{r}
+colisiones$frec_colision_anyo_0 <- NULL
+```
+
+agrupamos marcas con baja frecuencia para poder correr los algoritmos
+```{r}
+lowfreq_marcas <- colisiones %>% 
+  group_by(nmarca) %>% 
+  summarise(freq = n()) %>% 
+  filter(freq < 30) %>% 
+  pull(nmarca)
+
+colisiones$nmarca[colisiones$nmarca %in% lowfreq_marcas] <- 'others'
+```
+
+
 
 # EDA
 Mostramos una muestra aleatoria de los datos del DF de colisiones
@@ -101,7 +133,7 @@ for(i in 1:length(outliers)){
 armamos modelo lineal para emplear cook distance y determinar outliers
 
 ```{r}
-mod <- lm(var_objetivo ~ ., data=colisiones %>% select_if(is.numeric))
+mod <- lm(var_objetivo ~ ., data=colisiones %>% select_if(~is.numeric(.x)|is.factor(.x)) %>% mutate_if(is.factor, as.numeric))
 cooksd <- cooks.distance(mod)
 ```
 
@@ -138,9 +170,12 @@ test <- colisiones[-train_obs,]
 
 ```{r}
 imputed_train <- mice(train, m=1)
+imputed_test <- mice(test, m=1)
 ```
+
 ```{r}
 imp_train <- complete(imputed_train,1)
+imp_test <- complete(imputed_test,1)
 ```
 
 
@@ -178,6 +213,149 @@ write data
 
 ```{r}
 write_csv(train_balanced, 'out/train_balanced.csv')
-write_csv(test, 'out/test.csv')
+write_csv(imp_test, 'out/test.csv')
+```
+
+armamos k folds
+
+
+```{r}
+folds <- function(df, k){
+  obs = sample(1:nrow(df), nrow(df))
+  kobs = floor(nrow(df)/k)
+  
+  undivisible_obs = rep(1, nrow(df) %% k)
+  cvlist = append(undivisible_obs, do.call(c,map(1:k, ~ rep(.x, kobs))))
+  x = split(obs, cvlist)
+    
+  
+  return(x)
+}
+```
+
+```{r}
+df_folds <-  map(folds(train_balanced, 5), ~ train_balanced[.x,])
+```
+
+
+probamos con regresión logística
+
+```{r}
+combs <- combinations(5,4)
+cv_aucs <-  c()
+for(i in 1:5){
+  cv_train = do.call(rbind, df_folds[combs[i,]])
+  cv_test = df_folds[[setdiff(1:5, combs[i,])]]
+  
+  logit_cv = glm(var_objetivo ~ . , data = cv_train , family = "binomial")
+  pred_cv = predict(logit_cv, cv_test %>% select(-var_objetivo))
+
+  
+  auc_cv = auc(cv_test$var_objetivo, pred_cv)
+  print(auc_cv)
+  
+  cv_aucs <- c(cv_aucs, auc_cv)
+  
+}
+
+mean(cv_aucs)
+```
+
+probamos con Decision trees
+
+```{r}
+tc <- tree(var_objetivo ~ ., data=train_balanced)
+```
+```{r}
+pred_tc <- predict(tc, imp_test %>% select(-var_objetivo), type = "class")
+```
+
+```{r}
+auc(imp_test$var_objetivo, pred_tc)
+```
+
+probamos con random forests
+
+
+```{r}
+rf <- randomForest(var_objetivo ~ ., data=train_balanced)
+```
+
+
+
+```{r}
+pred_rf <- predict(rf, imp_test %>% select(-var_objetivo))
+```
+
+```{r}
+auc(imp_test$var_objetivo, pred_rf)
+```
+ probamos xgboost
+
+```{r}
+xgb_c <-
+  xgboost(
+    data = data.matrix(train_balanced[, -1]),
+    label = train_balanced$var_objetivo %>% as.character() %>% as.numeric(),
+    eta = c(0.001),
+    max_depth = 10,
+    nround = 100,
+    subsample = 0.7,
+    colsample_bytree = 0.5,
+    nthread = 10,
+    objective = 'binary:logistic',
+    eval_metric = 'auc'
+  )
+
+
+```
+```{r}
+pred_xgb <- predict(xgb_c, data.matrix(imp_test %>% select(-var_objetivo))) 
+```
+
+```{r}
+auc(imp_test$var_objetivo, pred_xgb)
+```
+
+```{r}
+trControl  <- trainControl(method = "cv",
+                           number = 5,
+                           allowParallel = TRUE)
+```
+
+
+
+```{r}
+x_train <- model.matrix( ~ ., train_balanced %>% select(-var_objetivo))
+x_test  <- model.matrix( ~ ., imp_test %>% select(-var_objetivo))
+```
+
+```{r}
+glm.CV <- train(x= x , y= as.factor(train_balanced$var_objetivo),
+                  method = 'glmnet',
+                  trControl = trControl,
+                  family = "binomial")
+glm.CV
+```
+
+
+
+
+
+```{r}
+
+mtry <- sqrt(ncol(x_train))
+tunegrid <- expand.grid(.mtry=mtry)
+rf.CV <- train(x= x_train , y= as.factor(train_balanced$var_objetivo),
+                  method = 'rf',
+                  trControl = trControl,
+                  tuneGrid=tunegrid)
+rf.CV
+```
+
+
+
+```{r}
+pred0 <- predict(logreg.CV,x1)
 ```
 
