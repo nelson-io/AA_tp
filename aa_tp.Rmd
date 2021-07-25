@@ -37,11 +37,7 @@ library(xgboost)
 load("input/colisiones.RData")
 colisiones <- colisiones %>% clean_names() %>% 
   mutate_if(is.factor, as.character) %>% 
-  mutate(var_objetivo = as.factor(var_objetivo)) %>% 
-  mutate(potpeso = potencia/peso,
-         sportslx = ifelse(puertas<=3 & valor_vehiculo >= median(valor_vehiculo) & potencia >= median(potencia), 1, 0),
-         youngman = ifelse(sexo_tr == 'H' & edad_conductor <= 25,1,0),
-         oldwmn = ifelse(sexo_tr == 'M' & edad_conductor >= 60,1,0))
+  mutate(var_objetivo = as.factor(var_objetivo)) 
 ```
 
 removemos variable frec_colision_anyo_0 para evitar data leakage
@@ -51,6 +47,11 @@ colisiones$frec_colision_anyo_0 <- NULL
 ```
 
 agrupamos marcas con baja frecuencia para poder correr los algoritmos
+
+```{r}
+table(colisiones$nmarca) %>% data.frame() %>% arrange(Freq) %>% filter(Freq<30)
+```
+
 ```{r}
 lowfreq_marcas <- colisiones %>% 
   group_by(nmarca) %>% 
@@ -79,6 +80,7 @@ glimpse(colisiones)
 ## missing data
 
 ```{r}
+options(scipen = 20)
 miss_var_summary(colisiones)
 ```
 
@@ -128,12 +130,23 @@ for(i in 1:length(outliers)){
 
 ```
 
+## dividimos train test 80 -20%
+
+```{r}
+set.seed(0)
+train_obs <- sample(1:nrow(colisiones),floor(.8 * nrow(colisiones)))
+train <- colisiones[train_obs,]
+test <- colisiones[-train_obs,]
+
+```
+
+
 ## Outliers multivariados
 
 armamos modelo lineal para emplear cook distance y determinar outliers
 
 ```{r}
-mod <- lm(var_objetivo ~ ., data=colisiones %>% select_if(~is.numeric(.x)|is.factor(.x)) %>% mutate_if(is.factor, as.numeric))
+mod <- lm(var_objetivo ~ ., data=train %>% select_if(~is.numeric(.x)|is.factor(.x)) %>% mutate_if(is.factor, as.numeric))
 cooksd <- cooks.distance(mod)
 ```
 
@@ -153,18 +166,10 @@ head(colisiones[influential, ])
 ```
 removemos outliers multiariados
 ```{r}
-colisiones <- colisiones[-influential,]
+train <- train[-influential,]
 ```
 
-## dividimos train test 80 -20%
 
-```{r}
-set.seed(0)
-train_obs <- sample(1:nrow(colisiones),floor(.8 * nrow(colisiones)))
-train <- colisiones[train_obs,]
-test <- colisiones[-train_obs,]
-
-```
 
 ## imputamos NAs con mice imputation
 
@@ -174,11 +179,53 @@ imputed_test <- mice(test, m=1)
 ```
 
 ```{r}
-imp_train <- complete(imputed_train,1)
+imp_train <- complete(imputed_train,1) %>% filter(edad_conductor < 96, edad_conductor > 17) #filtramos atipicos
 imp_test <- complete(imputed_test,1)
+```
+## feature engineering
+
+```{r}
+add_fe_vars <- function(df){
+  
+ 
+  
+  out <- df%>% 
+  mutate(potpeso = potencia/peso,
+         sportslx = ifelse(puertas<=3 & valor_vehiculo >= median(valor_vehiculo) & potencia >= median(potencia), 1, 0),
+         youngman = ifelse(sexo_tr == 'H' & edad_conductor <= 25,1,0),
+         oldwmn = ifelse(sexo_tr == 'M' & edad_conductor >= 60,1,0),
+         edad_carnet = edad_conductor - ant_carnet,
+         siniestro_con_culpa = suma_siniestro_4_anyos - suma_siniestro_sin_culpa_4_anyos,
+         average_colisiones = suma_colision_4_anyos / 4
+         # ,
+         # pc1 = pca$x[,1],
+         # pc2 = pca$x[,2],
+         # pc3 = pca$x[,3]
+         ) %>% select(-c(frec_colision_anyo_1,frec_colision_anyo_2,frec_colision_anyo_3,frec_colision_anyo_4,
+               frec_siniestro_total_anyo_1,frec_siniestro_total_anyo_2,frec_siniestro_total_anyo_3,frec_siniestro_total_anyo_4,
+               frec_siniestro_sin_culpa_anyo_1, frec_siniestro_sin_culpa_anyo_2, frec_siniestro_sin_culpa_anyo_3, frec_siniestro_sin_culpa_anyo_4))
+  
+  return(out)
+}
+
+imp_train <- imp_train %>% add_fe_vars() %>% filter(edad_carnet >= 16, edad_carnet < 85)
+imp_test <- imp_test %>% add_fe_vars()
+
+
 ```
 
 
+```{r}
+ pca <- prcomp(~ant_vehiculo + edad_conductor + ant_carnet + potencia + peso + cilindrada + valor_vehiculo, 
+                data = imp_train, center = T, scale = T)
+
+trainPCA <- tbl_df(pca$x) %>% select(PC1:PC3)
+testPCA <-  tbl_df(predict(pca, newdata = imp_test)) %>% select(PC1:PC3)
+
+imp_train <- cbind(imp_train, trainPCA)
+imp_test <- cbind(imp_test, testPCA)
+
+```
 
 
 Balanceo de clases
@@ -193,7 +240,7 @@ ggplot(colisiones, aes(x = as.factor(var_objetivo)))+
   annotate("text", x = as.factor(1), y = 30000, label = paste0(round(props[2],2) * 100,'%'), col = 'white')+
   xlab('Variable Objetivo')
 ```
-Balanceamos train set con upsampoling
+Balanceamos train set con upsampling
 
 
 ```{r}
@@ -290,6 +337,21 @@ pred_rf <- predict(rf, imp_test %>% select(-var_objetivo))
 ```{r}
 auc(imp_test$var_objetivo, pred_rf)
 ```
+ probamos logistica test
+ 
+```{r}
+logit = glm(var_objetivo ~ . , data = train_balanced , family = "binomial")
+  pred_logit = predict(logit, imp_test %>% select(-var_objetivo))
+
+  
+  auc_logit = auc(imp_test$var_objetivo, pred_logit)
+  print(auc_logit)
+```
+ 
+ 
+ 
+ 
+ 
  probamos xgboost
 
 ```{r}
@@ -297,11 +359,12 @@ xgb_c <-
   xgboost(
     data = data.matrix(train_balanced[, -1]),
     label = train_balanced$var_objetivo %>% as.character() %>% as.numeric(),
-    eta = c(0.001),
-    max_depth = 10,
-    nround = 100,
+    eta = c(0.14),
+    gamma = 1.8,
+    max_depth = 5,
+    nround = 80,
     subsample = 0.7,
-    colsample_bytree = 0.5,
+    colsample_bytree = 0.65,
     nthread = 10,
     objective = 'binary:logistic',
     eval_metric = 'auc'
