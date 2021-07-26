@@ -162,7 +162,7 @@ influential <- as.numeric(names(cooksd)[(cooksd > 4*mean(cooksd, na.rm=T))])
 vemos algunos de los valores extremos detectados de manera multivariada
 
 ```{r}
-head(colisiones[influential, ])
+head(colisiones[influential, ]) %>% View()
 ```
 removemos outliers multiariados
 ```{r}
@@ -227,6 +227,32 @@ imp_test <- cbind(imp_test, testPCA)
 
 ```
 
+Baseline
+
+
+Regresión Logística sin ingeniería de datos
+```{r}
+train <- train %>% select(-nmarca)
+
+df1_folds <-  map(folds(train, 5), ~ train[.x,])
+
+combs <- combinations(5,4)
+cv_aucs <-  c()
+for(i in 1:5){
+  cv_train = do.call(rbind, df1_folds[combs[i,]])
+  cv_test = df1_folds[[setdiff(1:5, combs[i,])]]
+  
+  logit_cv = glm(var_objetivo ~ . , data = cv_train , family = "binomial")
+  pred_cv = predict(logit_cv, cv_test %>% select(-var_objetivo))
+  
+  auc_cv = auc(cv_test$var_objetivo, pred_cv)
+  print(auc_cv)
+  
+  cv_aucs <- c(cv_aucs, auc_cv)
+  
+}
+mean(cv_aucs)
+```
 
 Balanceo de clases
 
@@ -349,6 +375,41 @@ logit = glm(var_objetivo ~ . , data = train_balanced , family = "binomial")
 ```
  
  
+
+XGBoost con grilla de hiperparámetros
+```{r} 
+nround = c(30,80, 120)
+eta = c(0.1, 0.15, 0.2) 
+gamma = c(1.3,1,6, 1.9)
+max_d = c(3,5,7)
+subsum = c(0.3, 0.8)
+colsample = c(0.4,0.9)
+parametros = expand.grid(nround = nround, eta = eta, 
+                         gamma = gamma, 
+                         max_d = max_d, subsum = subsum,
+                         colsample = colsample)
+a = sample(1:nrow(parametros), size = 40)
+parametros = parametros[a,]
+
+set.seed(1)
+for(i in 1:dim(parametros)[1]){
+    xgb_c = xgboost(data = data.matrix(train_balanced[, -1]),
+        label = train_balanced$var_objetivo %>% as.character() %>% as.numeric(),
+        eta = parametros[i,2],
+        gamma = parametros[i,3],
+        max_depth = parametros[i,4],
+        nround = parametros[i,1],
+        subsample = parametros[i,5],
+        colsample_bytree = parametros[i,6],
+        nthread = 8,
+        objective = 'binary:logistic',
+        eval_metric = 'auc')
+    parametros[i, 7] = max(xgb_c$evaluation_log$train_auc)
+    pred_xgb <- predict(xgb_c, data.matrix(imp_test %>% select(-var_objetivo)))
+    parametros[i, 8] = auc(imp_test$var_objetivo, pred_xgb)
+  print(i)
+}
+```
  
  
  
